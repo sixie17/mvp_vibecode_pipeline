@@ -16,7 +16,7 @@ The app itself is **stateless**: no database, no persistent storage for business
 
 **Prerequisite for Lane 1**: the ticket tool's native GitHub integration (Linear↔GitHub, or GitHub for Jira) must already be installed and connected on the project/repo being worked on — that's how ticket↔PR linking is derived, not a scheme this app invents. The pipeline checks this per ticket before acting and stops with a comment if it isn't connected.
 
-**Status**: Lane 1's first four steps (listen, verify the GitHub integration, read, refine) are implemented for Linear — see [SKILLS.md](SKILLS.md). Everything else (plan/code/test/PR/review, and all of Lane 2) is still design, not code. Full design, state-derivation rules, and open questions: [CLAUDE.md](CLAUDE.md#target-architecture-two-lanes).
+**Status**: Lane 1's first four steps (listen, verify the GitHub integration, read, refine) are implemented for Linear, and step 9's listening half (recognizing a submitted review or new review comment) is implemented for GitHub — see [SKILLS.md](SKILLS.md). Everything else (plan/code/test/PR, review triage, and all of Lane 2) is still design, not code. Full design, state-derivation rules, and open questions: [CLAUDE.md](CLAUDE.md#target-architecture-two-lanes).
 
 ## Stack
 
@@ -24,7 +24,8 @@ The app itself is **stateless**: no database, no persistent storage for business
 - LangChain for building/running agent chains (`agents/services.py`), with provider/model selectable per call (OpenAI, Anthropic, ...) via LangChain's `init_chat_model`
 - LangSmith for tracing/observability of every chain run
 - Django REST Framework for the API surface
-- Linear's GraphQL API + webhooks (`linear` app) for Lane 1's trigger
+- Linear's GraphQL API + webhooks (`linear` app) for Lane 1's ticket-side trigger
+- GitHub webhooks (`github` app) for Lane 1's review-side trigger (listening only so far)
 
 ## Setup
 
@@ -33,7 +34,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env   # fill in the provider key(s) you'll use, LANGCHAIN_API_KEY, and (for Lane 1) the LINEAR_* vars
+cp .env.example .env   # fill in the provider key(s) you'll use, LANGCHAIN_API_KEY, and (for Lane 1) the LINEAR_* and GITHUB_WEBHOOK_SECRET vars
 
 python manage.py migrate
 python manage.py createsuperuser   # optional, for /admin/
@@ -41,6 +42,8 @@ python manage.py runserver
 ```
 
 To actually receive Linear webhooks locally, expose `localhost:8000` with a tunnel (e.g. `ngrok http 8000`) and register `<tunnel-url>/api/linear/webhook/` as an Issue webhook in Linear's settings, using the signing secret as `LINEAR_WEBHOOK_SECRET`.
+
+Same idea for GitHub: register `<tunnel-url>/api/github/webhook/` as a webhook on the target repo (subscribed to "Pull request reviews" and "Pull request review comments"), using its signing secret as `GITHUB_WEBHOOK_SECRET`. Right now this only logs recognized review events — there's no triage or API client wired up yet.
 
 ## LangSmith tracing
 
@@ -75,6 +78,7 @@ Lane 1's Linear trigger isn't something you curl directly — assign a Linear is
 - `config/` — Django project settings, root URLs
 - `agents/` — general LangChain plumbing: `models.py` (`AgentRun`), `services.py` (provider/model-selectable chain construction + invocation), `views.py` / `urls.py` (the `/api/agents/run/` endpoint)
 - `linear/` — Lane 1's Linear-side trigger: `webhooks.py` (signature verification, event filtering), `client.py` (`LinearClient`), `services.py` (verify → read → refine), `views.py` / `urls.py` (the `/api/linear/webhook/` endpoint). No `models.py` — nothing here is persisted locally, by design (see [CLAUDE.md](CLAUDE.md#state-derived-not-stored)).
+- `github/` — Lane 1's GitHub review-side trigger, listening only: `webhooks.py` (signature verification, event filtering), `services.py` (logs recognized review events — no triage yet), `views.py` / `urls.py` (the `/api/github/webhook/` endpoint). No `models.py`, no API client yet.
 
 ## Docs
 

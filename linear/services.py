@@ -11,21 +11,11 @@ Linear, per CLAUDE.md#state-derived-not-stored.
 
 from django.conf import settings
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
 
 from agents.services import build_chat_model
 
 from .client import LinearClient
-
-REFINE_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        'system',
-        'You turn a raw engineering ticket into a concrete, actionable spec: '
-        'what needs to change and why. Call out any ambiguity explicitly '
-        'instead of silently guessing at it.',
-    ),
-    ('human', 'Ticket {identifier}: {title}\n\n{description}'),
-])
+from .prompts import REFINE_PROMPT
 
 
 class IntegrationNotConnected(Exception):

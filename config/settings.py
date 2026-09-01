@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'agents',
     'linear',
+    'github',
 ]
 
 MIDDLEWARE = [
@@ -155,3 +156,8 @@ DEFAULT_LLM_MODEL = os.environ.get('DEFAULT_LLM_MODEL', 'gpt-4o-mini')
 LINEAR_API_KEY = os.environ.get('LINEAR_API_KEY', '')
 LINEAR_WEBHOOK_SECRET = os.environ.get('LINEAR_WEBHOOK_SECRET', '')
 LINEAR_BOT_USER_ID = os.environ.get('LINEAR_BOT_USER_ID', '')
+
+# GitHub integration — Lane 1 step 9's trigger (listening only so far), see
+# CLAUDE.md "Lane 1" and github/services.py. No API token yet: there's no
+# GitHub client, so nothing is read back or written from this app yet.
+GITHUB_WEBHOOK_SECRET = os.environ.get('GITHUB_WEBHOOK_SECRET', '')

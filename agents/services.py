@@ -12,8 +12,9 @@ from dataclasses import dataclass
 from django.conf import settings
 from langchain.chat_models import init_chat_model
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tracers.context import collect_runs
+
+from .prompts import RUN_PROMPT
 
 
 @dataclass
@@ -37,7 +38,6 @@ def build_chat_model(provider: str | None = None, model: str | None = None):
     return init_chat_model(
         model=model or settings.DEFAULT_LLM_MODEL,
         model_provider=provider or settings.DEFAULT_LLM_PROVIDER,
-        temperature=0,
     )
 
 
@@ -49,11 +49,7 @@ def build_chain(provider: str | None = None, model: str | None = None):
     pattern below.
     """
     llm = build_chat_model(provider, model)
-    prompt = ChatPromptTemplate.from_messages([
-        ('system', 'You are a helpful assistant embedded in a Django app.'),
-        ('human', '{input}'),
-    ])
-    return prompt | llm | StrOutputParser()
+    return RUN_PROMPT | llm | StrOutputParser()
 
 
 def run_prompt(text: str, provider: str | None = None, model: str | None = None) -> ChainResult:

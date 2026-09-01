@@ -15,7 +15,7 @@ Sends a single prompt through a LangChain chain and returns the model's response
 - **Endpoint**: `POST /api/agents/run/`
 - **Request**: `{"prompt": "<text>", "provider": "<optional, e.g. 'anthropic'>", "model": "<optional, e.g. 'claude-3-5-sonnet-latest'>"}` — omit `provider`/`model` to use the configured defaults.
 - **Response**: `{"id": <AgentRun id>, "response": "<text>", "langsmith_run_id": "<uuid>"}`
-- **Implementation**: [agents/services.py](agents/services.py) (`build_chat_model`, `build_chain`, `run_prompt`), exposed by [agents/views.py](agents/views.py) (`AgentRunView`)
+- **Implementation**: [agents/services.py](agents/services.py) (`build_chat_model`, `build_chain`, `run_prompt`) with its prompt template in [agents/prompts.py](agents/prompts.py) (`RUN_PROMPT`), exposed by [agents/views.py](agents/views.py) (`AgentRunView`)
 - **Audit trail**: every call is persisted as an [agents/models.py](agents/models.py) `AgentRun` row (prompt, response, provider, model, status, error) and traced in full in LangSmith under the `LANGCHAIN_PROJECT` project — the two are linked via `langsmith_run_id`, visible in `/admin/`. *(This DB-backed audit trail predates the app's statelessness decision — see [CLAUDE.md](CLAUDE.md#state-derived-not-stored) — and is not the pattern for new skills below: those read state from Linear/Jira/GitHub instead of persisting locally.)*
 - **Config**: `DEFAULT_LLM_PROVIDER` (defaults to `openai`), `DEFAULT_LLM_MODEL` (defaults to `gpt-4o-mini`), plus whichever provider API key(s) you use (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...)
 
@@ -26,22 +26,34 @@ Listens for a Linear issue being assigned to the bot, verifies the project's nat
 - **Trigger**: Linear webhook → `POST /api/linear/webhook/` (configure this URL as an Issue webhook in Linear's settings)
 - **Auth**: HMAC-SHA256 signature verification (`LINEAR_WEBHOOK_SECRET`), not a request body/header credential
 - **Filter**: only fires when the issue's assignee becomes `LINEAR_BOT_USER_ID` — see `linear/webhooks.py` (`is_issue_assigned_to`)
-- **Implementation**: [linear/webhooks.py](linear/webhooks.py) (signature/event filtering), [linear/client.py](linear/client.py) (`LinearClient`), [linear/services.py](linear/services.py) (`handle_issue_assigned`, `verify_github_integration`, `refine_ticket`), exposed by [linear/views.py](linear/views.py) (`LinearWebhookView`)
+- **Implementation**: [linear/webhooks.py](linear/webhooks.py) (signature/event filtering), [linear/client.py](linear/client.py) (`LinearClient`), [linear/services.py](linear/services.py) (`handle_issue_assigned`, `verify_github_integration`, `refine_ticket`) with its prompt template in [linear/prompts.py](linear/prompts.py) (`REFINE_PROMPT`), exposed by [linear/views.py](linear/views.py) (`LinearWebhookView`)
 - **Audit trail**: none locally, by design — the refined spec is the comment left on the Linear issue itself, and the LLM call is traced in LangSmith. See [CLAUDE.md](CLAUDE.md#state-derived-not-stored).
 - **Config**: `LINEAR_API_KEY`, `LINEAR_WEBHOOK_SECRET`, `LINEAR_BOT_USER_ID`, plus the LLM config above. Requires the Linear↔GitHub integration installed on the target team first — see [CLAUDE.md](CLAUDE.md#prerequisite-native-jiralinear--github-integration).
 - **Runs inline** in the webhook request (no task queue yet) — fine for a single LLM call, but this will need revisiting once steps 5–8 (which are much slower) are added.
+
+### GitHub review ingestion (Lane 1, step 9 — listening only)
+
+Listens for a GitHub pull request review being submitted, or a new inline review comment, and recognizes it as an event Lane 1 needs to act on. Does not yet triage the comment (fix vs. reply) or call the GitHub API at all — see "Planned" below.
+
+- **Trigger**: GitHub webhook → `POST /api/github/webhook/` (configure this URL as a webhook on the target repo, subscribed to "Pull request reviews" and "Pull request review comments")
+- **Auth**: HMAC-SHA256 signature verification (`GITHUB_WEBHOOK_SECRET`) against the `X-Hub-Signature-256` header — no payload timestamp/replay check the way Linear's webhook has, since GitHub's payload doesn't carry one
+- **Filter**: only fires on a submitted review or a newly created review comment — see `github/webhooks.py` (`is_review_event`); GitHub's own `ping` event (sent when the webhook is first configured) is answered 200 without further processing
+- **Implementation**: [github/webhooks.py](github/webhooks.py) (signature/event filtering), [github/services.py](github/services.py) (`handle_review_event` — currently just logs the event), exposed by [github/views.py](github/views.py) (`GitHubWebhookView`)
+- **Audit trail**: none — the event is logged only; no persistence, no GitHub API call, per [CLAUDE.md](CLAUDE.md#state-derived-not-stored)
+- **Config**: `GITHUB_WEBHOOK_SECRET`
+- **Not yet built**: a GitHub API client (to read PR/CI/thread state or post replies), and the fix-vs-reply triage policy itself — see "Open questions" below
 
 ---
 
 ## Planned — Lane 1: Implementation agent (ticket → PR → merged)
 
-Full flow described in [CLAUDE.md](CLAUDE.md#lane-1--implementation-agent-ticket--pr--merged). Steps 1–4 are implemented for Linear (see "Linear ticket refine" above); each step below becomes its own entry once built.
+Full flow described in [CLAUDE.md](CLAUDE.md#lane-1--implementation-agent-ticket--pr--merged). Steps 1–4 are implemented for Linear, and step 9's listening half is implemented for GitHub (see "Linear ticket refine" and "GitHub review ingestion" above); each item below becomes its own entry once built.
 
 - Produce a dev plan from the refined ticket
 - Implement the code change
 - Write tests for the change
 - Open a PR referencing the ticket
-- Listen for GitHub review events on open PRs
+- A GitHub API client to read PR/CI/review-thread state and post comments/commits (ingestion currently only listens — see "GitHub review ingestion" above)
 - Triage each review comment: push a code fix, or reply only
 - Push updates after a fix; loop until merged
 - Support Jira as a second ticket source (Linear is first — see "Open questions")

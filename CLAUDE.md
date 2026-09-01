@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Django app that is the base for an autonomous coding pipeline built from two lanes that close a loop with each other — Lane 1 turns a ticket into a reviewed, merged PR; Lane 2 turns observed bad behavior in a deployed system into a ticket for Lane 1 to pick up. The app itself is designed to be **stateless**: no app-owned database or persistent storage for business state, ever — see "State: derived, not stored" below. See "Target architecture: two lanes" for the full design, and [SKILLS.md](SKILLS.md) for what's implemented vs still planned. Two apps exist so far: `agents` (a general LangChain chain-running scaffold, provider/model selectable, traced in LangSmith) and `linear` (Lane 1's webhook trigger — steps 1–4 only: listen, verify the GitHub integration, read, refine; nothing past that is built). Lane 2 and the rest of Lane 1 (plan/code/test/PR/review) are still design only.
+A Django app that is the base for an autonomous coding pipeline built from two lanes that close a loop with each other — Lane 1 turns a ticket into a reviewed, merged PR; Lane 2 turns observed bad behavior in a deployed system into a ticket for Lane 1 to pick up. Django is this control plane's own implementation language — it is not a constraint on what the pipeline can act on. The product goal is codebase-agnostic: speed up the scrum process and let humans manage tasks and review code, while the agent works against whatever target repo/stack a ticket points at (not just Django/Python). Steps that touch a target repo (Lane 1's plan/code/test/PR) must detect and parametrize that repo's own language and tooling rather than assuming this control plane's stack. The app itself is designed to be **stateless**: no app-owned database or persistent storage for business state, ever — see "State: derived, not stored" below. See "Target architecture: two lanes" for the full design, and [SKILLS.md](SKILLS.md) for what's implemented vs still planned. Three apps exist so far: `agents` (a general LangChain chain-running scaffold, provider/model selectable, traced in LangSmith), `linear` (Lane 1's ticket-side trigger — steps 1–4 only: listen, verify the GitHub integration, read, refine), and `github` (Lane 1 step 9's review-side trigger — listening only: recognizes a submitted review or new review comment on a PR; triaging it is not built). Lane 2 and the rest of Lane 1 (plan/code/test/PR/review triage) are still design only.
 
 ## Commands
 
@@ -20,7 +20,7 @@ python manage.py runserver          # dev server
 python manage.py migrate            # apply migrations
 python manage.py makemigrations agents   # after changing agents/models.py (agents is the only app with models)
 python manage.py check              # system check (fast sanity check, no DB needed)
-python manage.py test agents linear # run both apps' tests
+python manage.py test agents linear github # run all three apps' tests
 python manage.py test linear.tests.VerifySignatureTests.test_valid_signature_passes  # single test
 python manage.py createsuperuser    # for /admin/
 ```
@@ -32,13 +32,19 @@ There is no separate lint/format command configured yet.
 - `config/` — the Django project (settings, root URLconf, WSGI/ASGI). `config/settings.py` calls `load_dotenv(BASE_DIR / '.env')` at import time, so every setting that comes from the environment (Django secret key/debug/hosts, `DEFAULT_LLM_PROVIDER`/`DEFAULT_LLM_MODEL`, `LINEAR_*`, and all `LANGCHAIN_*` vars) is available as soon as Django boots. Provider API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...) are deliberately *not* read into a setting — each provider's LangChain integration reads its own key straight from the environment.
 - `agents/` — general LangChain plumbing, reused by every capability in the repo:
   - `services.py` — `build_chat_model(provider, model)` builds a chat model via LangChain's `init_chat_model`, falling back to `DEFAULT_LLM_PROVIDER`/`DEFAULT_LLM_MODEL` when either is omitted. `build_chain()`/`run_prompt()` wrap that into the "Run prompt" skill's chain, invoked inside `collect_runs()` so the LangSmith run id can be captured. Any new chain (in `agents/` or elsewhere, e.g. `linear/services.py`) should call `build_chat_model()` rather than constructing a provider client directly, so provider/model selection stays consistent everywhere.
+  - `prompts.py` — `ChatPromptTemplate`s used by this app's chains, kept out of `services.py` so prompt text can be read/edited independently of chain-building logic. Each app owns its own `prompts.py` (see `linear/prompts.py`) rather than sharing one module across apps.
   - `models.py` — `AgentRun`: one row per "Run prompt" invocation (prompt, response, provider, model, status, error, `langsmith_run_id`), persisted to the local DB. **This predates the statelessness decision below and is not the pattern to extend.** It's fine as-is for this one skill, but Lane 1/Lane 2 work must not add new DB-backed audit models — LangSmith is the trace history, and Linear/Jira/GitHub are the record of what happened (see "State: derived, not stored"). Note `linear/` below has no `models.py` at all, on purpose.
   - `views.py` / `urls.py` — thin DRF `APIView`s that call into `services.py`. `config/urls.py` mounts each app's urls under `/api/<app>/`.
 - `linear/` — Lane 1's Linear-side trigger, steps 1–4 only (see "Lane 1" below). No `models.py` — nothing here is persisted, by design.
   - `webhooks.py` — pure functions: `verify_signature()`/`check_timestamp()` implement Linear's HMAC-SHA256 webhook verification, `is_issue_assigned_to()` filters payloads down to genuine assignment-change events. Kept dependency-free (no Django imports) so they're trivially unit-testable — see `linear/tests.py`.
   - `client.py` — `LinearClient`: a thin GraphQL wrapper (`get_issue`, `create_comment`) around exactly the queries/mutations Lane 1 needs. No caching.
   - `services.py` — `handle_issue_assigned(issue_id)`: verifies the GitHub integration (`verify_github_integration`, raises `IntegrationNotConnected` and comments on the ticket if missing), then refines the ticket via `agents.services.build_chat_model()` and comments the result back. This is where step 5 onward (plan/code/test/PR) will be added.
+  - `prompts.py` — `REFINE_PROMPT`, the `ChatPromptTemplate` used by `refine_ticket()`, kept separate from orchestration logic for the same reason as `agents/prompts.py`.
   - `views.py` — `LinearWebhookView`: `csrf_exempt` (the HMAC signature is the real auth), runs the whole flow inline in the request per the "Long-running work" decision below, returns 401 on bad signature/stale timestamp, 500 (so Linear retries) on an unexpected error, 200 otherwise — including when `IntegrationNotConnected` was raised, since commenting on the ticket *is* the intended handling of that case, not a failure to retry.
+- `github/` — Lane 1's review-side trigger (step 9), listening only so far — no `models.py`, no API client, nothing here is persisted or written back to GitHub yet.
+  - `webhooks.py` — pure functions: `verify_signature()` implements GitHub's HMAC-SHA256 webhook verification (`X-Hub-Signature-256`, prefixed `sha256=`, no timestamp/replay check the way Linear has), `is_review_event()` filters payloads down to a submitted review or a newly created review comment. Dependency-free like `linear/webhooks.py`, for the same testability reason — see `github/tests.py`.
+  - `services.py` — `handle_review_event(event_type, payload)`: currently just logs the event (repo, PR, reviewer). This is a placeholder for step 9's triage logic, which isn't built — see "Open design decisions" below and the module's docstring for why.
+  - `views.py` — `GitHubWebhookView`: `csrf_exempt` for the same reason as `LinearWebhookView`, short-circuits GitHub's `ping` event (sent when the webhook is first configured), returns 401 on bad signature, 400 on unparseable JSON, 500 on an unexpected error while handling a recognized event, 200 otherwise.
 
 ### LangSmith observability
 
@@ -60,8 +66,10 @@ Event-driven, one run per ticket. Steps 1–4 are implemented for Linear (`linea
 6. **Code** the change.
 7. **Write tests** covering it.
 8. **Open a PR** referencing the ticket.
-9. **Wait for review.** On a GitHub review event, triage each comment: some need a code fix + push, others just need a reply (question, pushback, already addressed elsewhere) — this is a per-comment decision, not one branch for the whole review.
+9. **Wait for review.** On a GitHub review event, triage each comment: some need a code fix + push, others just need a reply (question, pushback, already addressed elsewhere) — this is a per-comment decision, not one branch for the whole review. *(Listening only is implemented: GitHub webhook → `GitHubWebhookView`, filtered to submitted reviews and new review comments. Triage itself is not built — see "Open design decisions".)*
 10. Loop back to step 9 until the PR is approved/merged.
+
+Steps 5–8 act on the *target* repo the ticket belongs to, which is not necessarily this repo and not necessarily Django/Python — this control plane must detect that repo's own language, structure, and test/build tooling rather than assuming its own stack.
 
 Each of steps 1–10 is a natural seam for a separate service module (or its own Django app) — see "Documentation conventions" below for how to register a new one in SKILLS.md as it's built.
 
