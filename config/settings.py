@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'agents',
+    'linear',
 ]
 
 MIDDLEWARE = [
@@ -144,5 +145,13 @@ MAILERS = {
 # LangSmith observability is configured entirely via environment variables
 # (LANGCHAIN_TRACING_V2, LANGCHAIN_API_KEY, LANGCHAIN_PROJECT, LANGCHAIN_ENDPOINT)
 # loaded from .env above — see agents/services.py for where the chain is built.
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+# Provider API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, ...) aren't read here —
+# each provider's LangChain integration picks its own key straight out of the
+# environment, so they only need to be set in .env, not threaded through settings.
+DEFAULT_LLM_PROVIDER = os.environ.get('DEFAULT_LLM_PROVIDER', 'openai')
 DEFAULT_LLM_MODEL = os.environ.get('DEFAULT_LLM_MODEL', 'gpt-4o-mini')
+
+# Linear integration — Lane 1's trigger, see CLAUDE.md "Lane 1" and linear/services.py.
+LINEAR_API_KEY = os.environ.get('LINEAR_API_KEY', '')
+LINEAR_WEBHOOK_SECRET = os.environ.get('LINEAR_WEBHOOK_SECRET', '')
+LINEAR_BOT_USER_ID = os.environ.get('LINEAR_BOT_USER_ID', '')

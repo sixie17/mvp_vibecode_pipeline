@@ -5,6 +5,6 @@ from .models import AgentRun
 
 @admin.register(AgentRun)
 class AgentRunAdmin(admin.ModelAdmin):
-    list_display = ('id', 'status', 'created_at', 'langsmith_run_id')
-    list_filter = ('status',)
+    list_display = ('id', 'status', 'provider', 'model', 'created_at', 'langsmith_run_id')
+    list_filter = ('status', 'provider')
     readonly_fields = ('created_at', 'updated_at')

@@ -18,6 +18,8 @@ class AgentRun(models.Model):
     response = models.TextField(blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     error = models.TextField(blank=True)
+    provider = models.CharField(max_length=64, blank=True, help_text='Empty means DEFAULT_LLM_PROVIDER was used.')
+    model = models.CharField(max_length=128, blank=True, help_text='Empty means DEFAULT_LLM_MODEL was used.')
     langsmith_run_id = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

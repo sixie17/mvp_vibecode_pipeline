@@ -17,10 +17,12 @@ class AgentRunView(APIView):
         prompt = request.data.get('prompt', '').strip()
         if not prompt:
             return Response({'detail': 'prompt is required'}, status=400)
+        provider = request.data.get('provider') or None
+        model = request.data.get('model') or None
 
-        run = AgentRun.objects.create(prompt=prompt)
+        run = AgentRun.objects.create(prompt=prompt, provider=provider or '', model=model or '')
         try:
-            result = run_prompt(prompt)
+            result = run_prompt(prompt, provider=provider, model=model)
         except Exception as exc:
             run.status = AgentRun.Status.FAILED
             run.error = str(exc)

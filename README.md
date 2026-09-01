@@ -16,14 +16,15 @@ The app itself is **stateless**: no database, no persistent storage for business
 
 **Prerequisite for Lane 1**: the ticket tool's native GitHub integration (Linear↔GitHub, or GitHub for Jira) must already be installed and connected on the project/repo being worked on — that's how ticket↔PR linking is derived, not a scheme this app invents. The pipeline checks this per ticket before acting and stops with a comment if it isn't connected.
 
-**Status**: only the foundational LangChain + LangSmith scaffold exists so far (see [SKILLS.md](SKILLS.md)) — neither lane is built yet, and that scaffold predates the statelessness decision. Full design, state-derivation rules, and open questions: [CLAUDE.md](CLAUDE.md#target-architecture-two-lanes).
+**Status**: Lane 1's first four steps (listen, verify the GitHub integration, read, refine) are implemented for Linear — see [SKILLS.md](SKILLS.md). Everything else (plan/code/test/PR/review, and all of Lane 2) is still design, not code. Full design, state-derivation rules, and open questions: [CLAUDE.md](CLAUDE.md#target-architecture-two-lanes).
 
 ## Stack
 
 - Django (project: `config`)
-- LangChain for building/running agent chains (`agents` app, `agents/services.py`)
+- LangChain for building/running agent chains (`agents/services.py`), with provider/model selectable per call (OpenAI, Anthropic, ...) via LangChain's `init_chat_model`
 - LangSmith for tracing/observability of every chain run
 - Django REST Framework for the API surface
+- Linear's GraphQL API + webhooks (`linear` app) for Lane 1's trigger
 
 ## Setup
 
@@ -32,12 +33,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env   # then fill in OPENAI_API_KEY and LANGCHAIN_API_KEY
+cp .env.example .env   # fill in the provider key(s) you'll use, LANGCHAIN_API_KEY, and (for Lane 1) the LINEAR_* vars
 
 python manage.py migrate
 python manage.py createsuperuser   # optional, for /admin/
 python manage.py runserver
 ```
+
+To actually receive Linear webhooks locally, expose `localhost:8000` with a tunnel (e.g. `ngrok http 8000`) and register `<tunnel-url>/api/linear/webhook/` as an Issue webhook in Linear's settings, using the signing secret as `LINEAR_WEBHOOK_SECRET`.
 
 ## LangSmith tracing
 
@@ -56,14 +59,22 @@ Once set, every LangChain call made through `agents/services.py` is traced autom
 curl -X POST http://127.0.0.1:8000/api/agents/run/ \
   -H "Content-Type: application/json" \
   -d '{"prompt": "hello"}'
+
+# or pick a provider/model explicitly:
+curl -X POST http://127.0.0.1:8000/api/agents/run/ \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "hello", "provider": "anthropic", "model": "claude-3-5-sonnet-latest"}'
 ```
 
-Returns the model's response plus the LangSmith run id. Each call is also persisted as an `AgentRun` (prompt, response, status, error, LangSmith run id) — visible in `/admin/`.
+Returns the model's response plus the LangSmith run id. Each call is also persisted as an `AgentRun` (prompt, response, provider, model, status, error, LangSmith run id) — visible in `/admin/`.
+
+Lane 1's Linear trigger isn't something you curl directly — assign a Linear issue (in a project with the GitHub integration connected) to the bot user configured as `LINEAR_BOT_USER_ID`, and Linear's webhook delivery does the rest; the refined spec shows up as a comment on the issue.
 
 ## Layout
 
 - `config/` — Django project settings, root URLs
-- `agents/` — the app: `models.py` (`AgentRun`), `services.py` (LangChain chain construction + invocation), `views.py` / `urls.py` (the `/api/agents/run/` endpoint)
+- `agents/` — general LangChain plumbing: `models.py` (`AgentRun`), `services.py` (provider/model-selectable chain construction + invocation), `views.py` / `urls.py` (the `/api/agents/run/` endpoint)
+- `linear/` — Lane 1's Linear-side trigger: `webhooks.py` (signature verification, event filtering), `client.py` (`LinearClient`), `services.py` (verify → read → refine), `views.py` / `urls.py` (the `/api/linear/webhook/` endpoint). No `models.py` — nothing here is persisted locally, by design (see [CLAUDE.md](CLAUDE.md#state-derived-not-stored)).
 
 ## Docs
 

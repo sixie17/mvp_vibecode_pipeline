@@ -19,7 +19,7 @@ If you can review a pull request from a coworker, you already know how to work w
 
 ## What it doesn't do (yet)
 
-This is early — right now the underlying scaffolding exists, but neither of the two capabilities above is built end to end. Nothing described here should be assumed to work today. For the technical breakdown of what's actually implemented versus planned, see [SKILLS.md](SKILLS.md).
+This is early. So far, assigning it a Linear ticket gets you the first part of step 1 — it reads the ticket and posts back a refined, concrete version of it as a comment. It does not yet write code, open pull requests, respond to reviews, or watch for problems (step 2) — none of that is built. Jira isn't supported yet either; Linear is first. For the technical breakdown of what's actually implemented versus planned, see [SKILLS.md](SKILLS.md).
 
 ## Why "stateless"?
 
