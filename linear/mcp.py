@@ -1,8 +1,17 @@
 """Linear MCP client wiring for the ticket-refine agent (see
 refine_ticket_agent() in services.py).
 
-Authenticates against Linear's own hosted MCP server
-(https://linear.app/docs/mcp) with a bearer token — the same LINEAR_API_KEY
+Deliberately points at Linear's **read-only** hosted MCP server
+(https://linear.app/docs/mcp documents this as a separate URL from the
+read-write one), not the read-write one. The refine agent's job is to
+explore and produce spec text, never to write to Linear — see
+services.py's handle_issue_assigned() for why posting the result back is
+deterministic code instead of an agent-invoked tool call. Binding the agent
+to a read-only connection makes that a structural guarantee (no write tool
+exists for it to call, or be talked into calling by a prompt-injected
+ticket) rather than something enforced only by the system prompt.
+
+Authenticated with a bearer token — the same LINEAR_API_KEY
 linear/client.py's GraphQL calls use, just presented as an MCP header
 instead of a GraphQL Authorization header, per Linear's documented
 server-to-server auth mode (no interactive OAuth needed).

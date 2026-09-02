@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'agents',
     'linear',
     'github',
+    'planner',
 ]
 
 MIDDLEWARE = [
@@ -157,9 +158,28 @@ LINEAR_API_KEY = os.environ.get('LINEAR_API_KEY', '')
 LINEAR_WEBHOOK_SECRET = os.environ.get('LINEAR_WEBHOOK_SECRET', '')
 LINEAR_BOT_USER_ID = os.environ.get('LINEAR_BOT_USER_ID', '')
 # Linear's own hosted MCP server (https://linear.app/docs/mcp) — used by the
-# refine step's tool-using agent (linear/mcp.py, linear/services.py). Same
-# LINEAR_API_KEY as above, sent as this server's bearer token.
-LINEAR_MCP_URL = os.environ.get('LINEAR_MCP_URL', 'https://mcp.linear.app/mcp')
+# refine step's tool-using agent (linear/mcp.py, linear/services.py). Read-only
+# endpoint on purpose: the agent only explores, it never writes to Linear
+# itself — see linear/services.py's handle_issue_assigned() for why posting
+# the result back is deterministic code instead. Same LINEAR_API_KEY as
+# above, sent as this server's bearer token.
+LINEAR_MCP_URL = os.environ.get('LINEAR_MCP_URL', 'https://mcp.linear.app/mcp/readonly')
+
+# The target repo Lane 1 plans/codes against, for step 5 (planner/) — see
+# CLAUDE.md's "Prerequisite"/Lane 1 notes on why this can't be derived from
+# Linear's API: Linear exposes no queryable field for which GitHub repo a
+# team/project is connected to (confirmed against Linear's public GraphQL
+# schema), only Issue.attachments once a branch/PR already exists, which is
+# too late for planning. So this app holds it as config instead — one
+# target repo per deployment for now, not a per-team/issue mapping.
+TARGET_REPO_CLONE_URL = os.environ.get('TARGET_REPO_CLONE_URL', '')
+TARGET_REPO_DEFAULT_BRANCH = os.environ.get('TARGET_REPO_DEFAULT_BRANCH', 'main')
+# Optional: a fine-grained PAT or GitHub App installation token, scoped to
+# just TARGET_REPO_CLONE_URL, for cloning a private repo. Leave unset for a
+# public repo. linear/services.py injects this into the clone URL as an
+# HTTPS credential (GitHub's own "x-access-token" pattern) rather than using
+# an SSH deploy key — see CLAUDE.md's "Prerequisite" section for why.
+TARGET_REPO_ACCESS_TOKEN = os.environ.get('TARGET_REPO_ACCESS_TOKEN', '')
 
 # GitHub integration — Lane 1 step 9's trigger (listening only so far), see
 # CLAUDE.md "Lane 1" and github/services.py. No API token yet: there's no

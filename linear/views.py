@@ -15,6 +15,8 @@ from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 
+from planner.workspace import CloneError
+
 from .services import IntegrationNotConnected, handle_issue_assigned
 from .webhooks import InvalidSignature, check_timestamp, is_issue_assigned_to, verify_signature
 
@@ -49,9 +51,11 @@ class LinearWebhookView(View):
         if is_issue_assigned_to(payload, settings.LINEAR_BOT_USER_ID):
             try:
                 handle_issue_assigned(payload['data']['id'])
-            except IntegrationNotConnected:
+            except (IntegrationNotConnected, CloneError):
                 # Already commented on the ticket explaining why — that's
                 # the intended terminal action for this event, not a bug.
+                # A CloneError specifically won't be fixed by Linear
+                # retrying the same webhook, so there's no point 500-ing.
                 pass
             except Exception:
                 logger.exception('Lane 1 failed for issue %s', payload['data'].get('id'))

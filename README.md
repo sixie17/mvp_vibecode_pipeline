@@ -16,7 +16,7 @@ The app itself is **stateless**: no database, no persistent storage for business
 
 **Prerequisite for Lane 1**: the ticket tool's native GitHub integration (Linear↔GitHub, or GitHub for Jira) must already be installed and connected on the project/repo being worked on — that's how ticket↔PR linking is derived, not a scheme this app invents. The pipeline checks this per ticket before acting and stops with a comment if it isn't connected.
 
-**Status**: Lane 1's first four steps (listen, verify the GitHub integration, read, refine) are implemented for Linear, and step 9's listening half (recognizing a submitted review or new review comment) is implemented for GitHub — see [SKILLS.md](SKILLS.md). Everything else (plan/code/test/PR, review triage, and all of Lane 2) is still design, not code. Full design, state-derivation rules, and open questions: [CLAUDE.md](CLAUDE.md#target-architecture-two-lanes).
+**Status**: Lane 1's first five steps (listen, verify the GitHub integration, read, refine, plan) are implemented for Linear, and step 9's listening half (recognizing a submitted review or new review comment) is implemented for GitHub — see [SKILLS.md](SKILLS.md). Everything else (code/test/PR, review triage, and all of Lane 2) is still design, not code. Full design, state-derivation rules, and open questions: [CLAUDE.md](CLAUDE.md#target-architecture-two-lanes).
 
 ## Stack
 
@@ -24,7 +24,7 @@ The app itself is **stateless**: no database, no persistent storage for business
 - LangChain for building/running agent chains (`agents/services.py`), with provider/model selectable per call (OpenAI, Anthropic, ...) via LangChain's `init_chat_model`
 - LangSmith for tracing/observability of every chain run
 - Django REST Framework for the API surface
-- Linear webhooks + GraphQL (`linear` app) for the trigger and the deterministic verify step; Linear's own hosted MCP server + a LangGraph tool-using agent for the read/refine/comment step
+- Linear webhooks + GraphQL (`linear` app) for the trigger, the deterministic verify step, and posting the final comment; Linear's own hosted **read-only** MCP server + a LangGraph tool-using agent for the read/refine step (the agent can't write to Linear itself — see CLAUDE.md)
 - GitHub webhooks (`github` app) for Lane 1's review-side trigger (listening only so far)
 
 ## Setup
@@ -34,7 +34,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env   # fill in the provider key(s) you'll use, LANGCHAIN_API_KEY, and (for Lane 1) the LINEAR_* and GITHUB_WEBHOOK_SECRET vars
+cp .env.example .env   # fill in the provider key(s) you'll use, LANGCHAIN_API_KEY, and (for Lane 1) the LINEAR_*, TARGET_REPO_*, and GITHUB_WEBHOOK_SECRET vars
 
 python manage.py migrate
 python manage.py createsuperuser   # optional, for /admin/
@@ -71,17 +71,19 @@ curl -X POST http://127.0.0.1:8000/api/agents/run/ \
 
 Returns the model's response plus the LangSmith run id. Each call is also persisted as an `AgentRun` (prompt, response, provider, model, status, error, LangSmith run id) — visible in `/admin/`.
 
-Lane 1's Linear trigger isn't something you curl directly — assign a Linear issue (in a project with the GitHub integration connected) to the bot user configured as `LINEAR_BOT_USER_ID`, and Linear's webhook delivery does the rest; the refined spec shows up as a comment on the issue.
+Lane 1's Linear trigger isn't something you curl directly — assign a Linear issue (in a project with the GitHub integration connected) to the bot user configured as `LINEAR_BOT_USER_ID`, and Linear's webhook delivery does the rest: the refined spec shows up as one comment, then a dev plan (cloned from `TARGET_REPO_CLONE_URL`) as a second. If that repo is private, also set `TARGET_REPO_ACCESS_TOKEN` (a fine-grained PAT or GitHub App installation token scoped to just that repo) — no SSH deploy key needed.
 
 ## Layout
 
 - `config/` — Django project settings, root URLs
 - `agents/` — general LangChain plumbing: `models.py` (`AgentRun`), `services.py` (provider/model-selectable chain construction + invocation), `views.py` / `urls.py` (the `/api/agents/run/` endpoint)
-- `linear/` — Lane 1's Linear-side trigger: `webhooks.py` (signature verification, event filtering), `client.py` (`LinearClient`, GraphQL — used only for the deterministic verify/fail-comment path), `mcp.py` (Linear's own hosted MCP server client), `services.py` (verify deterministically → hand off to a tool-using agent that reads, refines, and comments via MCP), `views.py` / `urls.py` (the `/api/linear/webhook/` endpoint). No `models.py` — nothing here is persisted locally, by design (see [CLAUDE.md](CLAUDE.md#state-derived-not-stored)).
+- `linear/` — Lane 1's Linear-side trigger: `webhooks.py` (signature verification, event filtering), `client.py` (`LinearClient`, GraphQL — the deterministic verify/fail-comment path, and posting both the refine agent's and the plan agent's output), `mcp.py` (Linear's own hosted **read-only** MCP server client), `services.py` (verify deterministically → refine via MCP agent → post spec → plan via `planner/` against `TARGET_REPO_CLONE_URL` → post plan), `views.py` / `urls.py` (the `/api/linear/webhook/` endpoint). No `models.py` — nothing here is persisted locally, by design (see [CLAUDE.md](CLAUDE.md#state-derived-not-stored)).
 - `github/` — Lane 1's GitHub review-side trigger, listening only: `webhooks.py` (signature verification, event filtering), `services.py` (logs recognized review events — no triage yet), `views.py` / `urls.py` (the `/api/github/webhook/` endpoint). No `models.py`, no API client yet.
+- `planner/` — Lane 1 step 5's implementation, called from `linear/`: `workspace.py` (shallow-clones a target repo into a temp dir, always cleaned up), `tools.py` (read-only `grep`/`read_file`/`list_files` tools scoped to that clone, with path-traversal protection), `services.py` (`plan_change` — a tool-using agent that explores the clone and returns a dev plan). No `models.py`, no views/urls of its own, and knows nothing about Linear — see [CLAUDE.md](CLAUDE.md).
 
 ## Docs
 
 - [HUMANS.md](HUMANS.md) — what this project is, in plain language, for non-technical readers
 - [SKILLS.md](SKILLS.md) — catalog of what the pipeline can actually do today (and what's planned but not built yet)
 - [CLAUDE.md](CLAUDE.md) — architecture notes and conventions for working in this repo with Claude Code
+- [IDEAS.md](IDEAS.md) — speculative directions not yet decided or built, kept separate from CLAUDE.md's settled design

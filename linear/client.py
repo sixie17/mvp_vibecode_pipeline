@@ -26,6 +26,9 @@ query($id: String!) {
     attachments(filter: { sourceType: { eq: "github" } }) {
       nodes { url title sourceType }
     }
+    comments {
+      nodes { body }
+    }
   }
 }
 """
@@ -61,9 +64,12 @@ class LinearClient:
         return payload['data']
 
     def get_issue(self, issue_id: str) -> dict:
-        """Fetch an issue plus its GitHub linkage: description for the
-        "refine" step, branchName and any linked github-sourced attachment
-        for the "verify integration" step (see linear/services.py).
+        """Fetch an issue plus its GitHub linkage and comments: description
+        for the "refine" step, branchName/attachments for the "verify
+        integration" step, and comments so handle_issue_assigned() can tell
+        whether refine/plan already ran for this issue (see
+        linear/services.py's idempotency handling) without storing anything
+        locally.
         """
         return self._execute(_GET_ISSUE_QUERY, {'id': issue_id})['issue']
 
