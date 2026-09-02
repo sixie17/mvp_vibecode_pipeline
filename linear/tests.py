@@ -1,10 +1,13 @@
 import hashlib
 import hmac
 import time
+from unittest.mock import AsyncMock, patch
 
 from django.test import SimpleTestCase
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
 
-from .services import IntegrationNotConnected, verify_github_integration
+from .services import IntegrationNotConnected, refine_ticket_agent, verify_github_integration
 from .webhooks import InvalidSignature, check_timestamp, is_issue_assigned_to, verify_signature
 
 
@@ -87,3 +90,22 @@ class VerifyGithubIntegrationTests(SimpleTestCase):
     def test_issue_without_branch_name_raises(self):
         with self.assertRaises(IntegrationNotConnected):
             verify_github_integration({'identifier': 'ENG-1', 'branchName': ''})
+
+
+class RefineTicketAgentTests(SimpleTestCase):
+    def test_returns_agent_final_message_with_no_live_mcp_or_llm_call(self):
+        """Wiring smoke test: stubs both the MCP client and the chat model so
+        this proves asyncio.run() + create_react_agent() + our message
+        extraction all line up, without needing a real LINEAR_API_KEY or LLM
+        credentials. It says nothing about what a real agent run would
+        actually do against Linear's live MCP server.
+        """
+        fake_model = FakeMessagesListChatModel(responses=[AIMessage(content='refined spec text')])
+        fake_mcp_client = AsyncMock()
+        fake_mcp_client.get_tools.return_value = []
+
+        with patch('linear.services.build_chat_model', return_value=fake_model), \
+                patch('linear.services.build_linear_mcp_client', return_value=fake_mcp_client):
+            result = refine_ticket_agent({'identifier': 'ENG-1'})
+
+        self.assertEqual(result, 'refined spec text')

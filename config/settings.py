@@ -156,6 +156,10 @@ DEFAULT_LLM_MODEL = os.environ.get('DEFAULT_LLM_MODEL', 'gpt-4o-mini')
 LINEAR_API_KEY = os.environ.get('LINEAR_API_KEY', '')
 LINEAR_WEBHOOK_SECRET = os.environ.get('LINEAR_WEBHOOK_SECRET', '')
 LINEAR_BOT_USER_ID = os.environ.get('LINEAR_BOT_USER_ID', '')
+# Linear's own hosted MCP server (https://linear.app/docs/mcp) — used by the
+# refine step's tool-using agent (linear/mcp.py, linear/services.py). Same
+# LINEAR_API_KEY as above, sent as this server's bearer token.
+LINEAR_MCP_URL = os.environ.get('LINEAR_MCP_URL', 'https://mcp.linear.app/mcp')
 
 # GitHub integration — Lane 1 step 9's trigger (listening only so far), see
 # CLAUDE.md "Lane 1" and github/services.py. No API token yet: there's no

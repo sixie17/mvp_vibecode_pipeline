@@ -24,7 +24,7 @@ The app itself is **stateless**: no database, no persistent storage for business
 - LangChain for building/running agent chains (`agents/services.py`), with provider/model selectable per call (OpenAI, Anthropic, ...) via LangChain's `init_chat_model`
 - LangSmith for tracing/observability of every chain run
 - Django REST Framework for the API surface
-- Linear's GraphQL API + webhooks (`linear` app) for Lane 1's ticket-side trigger
+- Linear webhooks + GraphQL (`linear` app) for the trigger and the deterministic verify step; Linear's own hosted MCP server + a LangGraph tool-using agent for the read/refine/comment step
 - GitHub webhooks (`github` app) for Lane 1's review-side trigger (listening only so far)
 
 ## Setup
@@ -77,7 +77,7 @@ Lane 1's Linear trigger isn't something you curl directly — assign a Linear is
 
 - `config/` — Django project settings, root URLs
 - `agents/` — general LangChain plumbing: `models.py` (`AgentRun`), `services.py` (provider/model-selectable chain construction + invocation), `views.py` / `urls.py` (the `/api/agents/run/` endpoint)
-- `linear/` — Lane 1's Linear-side trigger: `webhooks.py` (signature verification, event filtering), `client.py` (`LinearClient`), `services.py` (verify → read → refine), `views.py` / `urls.py` (the `/api/linear/webhook/` endpoint). No `models.py` — nothing here is persisted locally, by design (see [CLAUDE.md](CLAUDE.md#state-derived-not-stored)).
+- `linear/` — Lane 1's Linear-side trigger: `webhooks.py` (signature verification, event filtering), `client.py` (`LinearClient`, GraphQL — used only for the deterministic verify/fail-comment path), `mcp.py` (Linear's own hosted MCP server client), `services.py` (verify deterministically → hand off to a tool-using agent that reads, refines, and comments via MCP), `views.py` / `urls.py` (the `/api/linear/webhook/` endpoint). No `models.py` — nothing here is persisted locally, by design (see [CLAUDE.md](CLAUDE.md#state-derived-not-stored)).
 - `github/` — Lane 1's GitHub review-side trigger, listening only: `webhooks.py` (signature verification, event filtering), `services.py` (logs recognized review events — no triage yet), `views.py` / `urls.py` (the `/api/github/webhook/` endpoint). No `models.py`, no API client yet.
 
 ## Docs

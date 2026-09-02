@@ -21,15 +21,15 @@ Sends a single prompt through a LangChain chain and returns the model's response
 
 ### Linear ticket refine (Lane 1, steps 1–4)
 
-Listens for a Linear issue being assigned to the bot, verifies the project's native GitHub integration is connected, reads the issue, and refines it into a concrete spec posted back as a comment. Stops (with an explanatory comment) instead of guessing if the GitHub integration isn't connected. Steps 5 onward (plan/code/test/PR/review) are not built — see "Planned" below.
+Listens for a Linear issue being assigned to the bot, verifies (in plain code) the project's native GitHub integration is connected, then hands off to a tool-using agent bound to Linear's own MCP server: it reads the issue's full context (description, comments, linked issues) and posts the refined spec back as a comment itself. Stops (with an explanatory comment) instead of guessing if the GitHub integration isn't connected — that check stays deterministic code, not agent discretion, on purpose (see the implementation files below). Steps 5 onward (plan/code/test/PR/review) are not built — see "Planned" below.
 
 - **Trigger**: Linear webhook → `POST /api/linear/webhook/` (configure this URL as an Issue webhook in Linear's settings)
-- **Auth**: HMAC-SHA256 signature verification (`LINEAR_WEBHOOK_SECRET`), not a request body/header credential
+- **Auth**: HMAC-SHA256 signature verification (`LINEAR_WEBHOOK_SECRET`) for the inbound webhook; `LINEAR_API_KEY` is sent as a bearer token to both the GraphQL API (`linear/client.py`) and Linear's MCP server (`linear/mcp.py`) — same credential, two transports
 - **Filter**: only fires when the issue's assignee becomes `LINEAR_BOT_USER_ID` — see `linear/webhooks.py` (`is_issue_assigned_to`)
-- **Implementation**: [linear/webhooks.py](linear/webhooks.py) (signature/event filtering), [linear/client.py](linear/client.py) (`LinearClient`), [linear/services.py](linear/services.py) (`handle_issue_assigned`, `verify_github_integration`, `refine_ticket`) with its prompt template in [linear/prompts.py](linear/prompts.py) (`REFINE_PROMPT`), exposed by [linear/views.py](linear/views.py) (`LinearWebhookView`)
-- **Audit trail**: none locally, by design — the refined spec is the comment left on the Linear issue itself, and the LLM call is traced in LangSmith. See [CLAUDE.md](CLAUDE.md#state-derived-not-stored).
-- **Config**: `LINEAR_API_KEY`, `LINEAR_WEBHOOK_SECRET`, `LINEAR_BOT_USER_ID`, plus the LLM config above. Requires the Linear↔GitHub integration installed on the target team first — see [CLAUDE.md](CLAUDE.md#prerequisite-native-jiralinear--github-integration).
-- **Runs inline** in the webhook request (no task queue yet) — fine for a single LLM call, but this will need revisiting once steps 5–8 (which are much slower) are added.
+- **Implementation**: [linear/webhooks.py](linear/webhooks.py) (signature/event filtering), [linear/client.py](linear/client.py) (`LinearClient`, used only for the deterministic verify/fail-comment path), [linear/mcp.py](linear/mcp.py) (`build_linear_mcp_client`, wraps `langchain_mcp_adapters.MultiServerMCPClient` against `LINEAR_MCP_URL`), [linear/services.py](linear/services.py) (`handle_issue_assigned`, `verify_github_integration`, `refine_ticket_agent` — a `langgraph.prebuilt.create_react_agent` bound to Linear's live MCP tools) with its system prompt in [linear/prompts.py](linear/prompts.py) (`REFINE_AGENT_PROMPT`), exposed by [linear/views.py](linear/views.py) (`LinearWebhookView`)
+- **Audit trail**: none locally, by design — the refined spec is the comment left on the Linear issue itself, and the whole agent run (LLM calls + tool calls) is traced in LangSmith. See [CLAUDE.md](CLAUDE.md#state-derived-not-stored).
+- **Config**: `LINEAR_API_KEY`, `LINEAR_WEBHOOK_SECRET`, `LINEAR_BOT_USER_ID`, `LINEAR_MCP_URL` (defaults to `https://mcp.linear.app/mcp`), plus the LLM config above. Requires the Linear↔GitHub integration installed on the target team first — see [CLAUDE.md](CLAUDE.md#prerequisite-native-jiralinear--github-integration).
+- **Runs inline** in the webhook request (no task queue yet) — an agent loop is slower and less bounded than the single LLM call this replaced, so this will need revisiting even sooner than before; see the "Long-running work" open decision.
 
 ### GitHub review ingestion (Lane 1, step 9 — listening only)
 
