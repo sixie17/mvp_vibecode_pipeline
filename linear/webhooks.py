@@ -49,3 +49,27 @@ def is_issue_assigned_to(payload: dict, user_id: str) -> bool:
     if action == 'update':
         return 'assigneeId' in (payload.get('updatedFrom') or {})
     return False
+
+
+def is_new_human_comment(payload: dict, bot_user_id: str) -> bool:
+    """True if this webhook event is a newly created Comment authored by
+    someone other than `bot_user_id`.
+
+    This is Lane 1's step-4 clarification loop's trigger (see CLAUDE.md's
+    "A clarification back-and-forth for step 4" open design decision): a
+    human replying on an already-refined ticket should make the refine agent
+    reconsider the spec. Excluding the bot's own comments is the same
+    self-loop guard is_issue_assigned_to() applies to assignment events,
+    applied here instead to comments — without it, every comment the bot
+    itself posts (refined spec, dev plan, a future reply) would re-trigger
+    this same handler and could reply to itself indefinitely. `userId` is
+    required to be present and non-matching (not just "not equal to
+    bot_user_id") since Linear's Comment.userId can be null for some
+    integration/bot auth configurations, and a comment we can't positively
+    attribute to a human is not a safe trigger either.
+    """
+    if payload.get('type') != 'Comment' or payload.get('action') != 'create':
+        return False
+    data = payload.get('data') or {}
+    author_id = data.get('userId')
+    return bool(author_id) and author_id != bot_user_id

@@ -1,4 +1,4 @@
-"""Lane 1 orchestration triggered by a Linear issue assignment.
+"""Lane 1 orchestration triggered by a Linear issue assignment or comment.
 
 Implements steps 2-5 of Lane 1 (CLAUDE.md#lane-1--implementation-agent-ticket--pr--merged):
 verify the ticket's native GitHub integration is connected, hand off to a
@@ -7,6 +7,11 @@ refines it into a concrete spec, then clone the target repo (planner/) and
 produce a dev plan from that spec — posting both the spec and the plan back
 as separate comments. Steps 6 onward (code, tests, PR, review triage) aren't
 built yet.
+
+handle_ticket_comment() implements step 4's clarification loop: a human
+reply on an already-refined ticket re-runs the refine agent so it can
+revise the spec — see its own docstring, and CLAUDE.md's "A clarification
+back-and-forth for step 4" open design decision this resolves.
 
 Which GitHub repo to clone for planner.plan_change() isn't something Linear's
 API can tell us — checked directly against Linear's public GraphQL schema,
@@ -44,10 +49,19 @@ here checks Linear's own comment history for its own marker prefix
 (REFINE_COMMENT_PREFIX/PLAN_COMMENT_PREFIX) before redoing that step, so a
 retried webhook becomes a no-op once the earlier attempt's work is visible
 on the issue — see CLAUDE.md's "State: derived, not stored" -> Idempotency
-paragraph and _find_existing_comment() below. A fail-comment (integration
-not connected, clone failed) deliberately carries neither prefix, since
-those are meant to be retried once the underlying problem is fixed, not
-treated as "already done".
+paragraph and _find_existing_comment() below.
+
+A fail-comment (integration not connected, clone failed) carries a marker
+prefix too, but is deduped differently from refine/plan: "any comment with
+this prefix exists" would wrongly treat a since-changed problem as
+"already handled" and never surface that it changed. Instead
+_post_failure_comment_once() reposts only when the *exact* message differs
+from the last one under that prefix, so an unfixed, identical failure (e.g.
+TARGET_REPO_DEFAULT_BRANCH still pointing at a branch that still doesn't
+exist) is a no-op on Linear's automatic retries — see CLAUDE.md's "Failure
+comments aren't deduped" open design decision — while a genuinely different
+failure still posts, since that's new information for whoever reads the
+ticket.
 """
 
 import asyncio
@@ -66,6 +80,8 @@ from .prompts import REFINE_AGENT_PROMPT
 
 REFINE_COMMENT_PREFIX = '**Refined spec:**\n\n'
 PLAN_COMMENT_PREFIX = '**Dev plan:**\n\n'
+INTEGRATION_FAILURE_COMMENT_PREFIX = "**Can't start yet:**\n\n"
+CLONE_FAILURE_COMMENT_PREFIX = "**Couldn't plan against target repo:**\n\n"
 
 
 class IntegrationNotConnected(Exception):
@@ -108,6 +124,38 @@ def _find_existing_comment(issue: dict, prefix: str) -> str | None:
         if body.startswith(prefix):
             return body[len(prefix):]
     return None
+
+
+def _has_response_after(issue: dict, prefix: str, after: str) -> bool:
+    """True if a comment starting with `prefix` was created after the ISO-8601
+    timestamp `after`.
+
+    Backs handle_ticket_comment()'s idempotency: rather than persisting
+    "which reply have I already answered", this re-derives it by comparing
+    Linear's own `createdAt` timestamps, which sort correctly as plain
+    strings in Linear's ISO-8601 format (e.g. "2024-01-01T00:00:00.000Z").
+    """
+    for comment in (issue.get('comments') or {}).get('nodes', []):
+        body = comment.get('body') or ''
+        if body.startswith(prefix) and (comment.get('createdAt') or '') > after:
+            return True
+    return False
+
+
+def _post_failure_comment_once(client: LinearClient, issue: dict, prefix: str, message: str) -> None:
+    """Post `message` under `prefix` unless the last comment under that same
+    prefix already has this *exact* message — see the module docstring for
+    why failure comments dedupe on content rather than "any comment with
+    this prefix exists" the way REFINE_COMMENT_PREFIX/PLAN_COMMENT_PREFIX do:
+    a fail-comment must still repost when the underlying problem changes, so
+    a human reassigning the ticket after a partial fix doesn't get told
+    about the *old* failure. This is what stops a persistent, unfixed
+    failure (e.g. a target repo with no commits on its default branch) from
+    reposting an identical explanation on each of Linear's automatic retries.
+    """
+    if _find_existing_comment(issue, prefix) == message:
+        return
+    client.create_comment(issue['id'], prefix + message)
 
 
 def _authenticated_clone_url(url: str, token: str) -> str:
@@ -194,9 +242,11 @@ def handle_issue_assigned(issue_id: str) -> str:
     Linear just keeps retrying forever — retrying won't fix a repo with no
     commits on it. CloneError's own message is already scrubbed of any
     embedded credential (see planner/workspace.py), so it's safe to include
-    verbatim in a ticket comment. Neither fail-comment carries a marker
-    prefix, so a later retry (after the human fixes the actual problem) is
-    still free to proceed rather than being mistaken for "already done".
+    verbatim in a ticket comment. Both fail-comments are deduped on exact
+    message content (_post_failure_comment_once()), not just "does a comment
+    with this prefix exist" — an unfixed, identical failure is a no-op on a
+    Linear retry, but a changed one still posts; see the module docstring
+    and CLAUDE.md's "Failure comments aren't deduped" open design decision.
     """
     client = LinearClient(settings.LINEAR_API_KEY)
     issue = client.get_issue(issue_id)
@@ -204,8 +254,10 @@ def handle_issue_assigned(issue_id: str) -> str:
     try:
         verify_github_integration(issue)
     except IntegrationNotConnected:
-        client.create_comment(
-            issue['id'],
+        _post_failure_comment_once(
+            client,
+            issue,
+            INTEGRATION_FAILURE_COMMENT_PREFIX,
             "I can't start on this ticket yet: this project's Linear<->GitHub "
             "integration doesn't look connected, so I have no way to link a "
             'branch or pull request back to it. Please connect the integration '
@@ -226,8 +278,10 @@ def handle_issue_assigned(issue_id: str) -> str:
     try:
         plan = plan_change(clone_url, settings.TARGET_REPO_DEFAULT_BRANCH, refined)
     except CloneError as exc:
-        client.create_comment(
-            issue['id'],
+        _post_failure_comment_once(
+            client,
+            issue,
+            CLONE_FAILURE_COMMENT_PREFIX,
             "I refined this ticket, but couldn't clone the target repo to plan "
             f'against it: {exc}\n\nCheck TARGET_REPO_CLONE_URL/'
             'TARGET_REPO_DEFAULT_BRANCH, and that the repo has at least one '
@@ -237,3 +291,57 @@ def handle_issue_assigned(issue_id: str) -> str:
 
     client.create_comment(issue['id'], PLAN_COMMENT_PREFIX + plan)
     return plan
+
+
+def handle_ticket_comment(issue_id: str, comment_id: str) -> str | None:
+    """Lane 1's step-4 clarification loop: a human reply on an
+    already-refined ticket makes the refine agent reconsider the spec.
+
+    Returns the (possibly revised) refined spec, or None if there was
+    nothing to do:
+
+    - No refine comment exists yet on this issue — a stray comment on a
+      not-yet-refined ticket isn't a reply to anything the agent asked, so
+      there's nothing to reconsider. (The assignment flow, not this one,
+      handles the initial refine.)
+    - The target comment can't be found on the issue (e.g. it was deleted
+      before this ran).
+    - A refine comment already exists with a `createdAt` after this
+      comment's — the agent already responded to it. This is the dedup that
+      matters in practice: Linear retries an undelivered webhook up to 3x
+      (see CLAUDE.md's "Idempotency"), and re-running a full agent loop plus
+      re-posting an unchanged spec on every retry would be exactly the
+      duplicate-comment problem _post_failure_comment_once() solves for
+      failures, just for a different trigger.
+
+    No local state tracks "which reply have I already answered" — every
+    call re-fetches the issue's full comment thread from Linear and
+    re-derives that from `_has_response_after()`, per
+    CLAUDE.md#state-derived-not-stored. refine_ticket_agent() itself reads
+    the thread fresh too (via Linear's MCP tools), so it naturally sees the
+    new reply without anything here needing to pass it along explicitly.
+
+    Unlike handle_issue_assigned()'s refine step, this always posts a new
+    REFINE_COMMENT_PREFIX comment once it decides to run — it must, since
+    the whole point is to publish a *revised* spec, not to skip because an
+    (older) one already exists.
+    """
+    client = LinearClient(settings.LINEAR_API_KEY)
+    issue = client.get_issue(issue_id)
+
+    if _find_existing_comment(issue, REFINE_COMMENT_PREFIX) is None:
+        return None
+
+    comment = next(
+        (c for c in (issue.get('comments') or {}).get('nodes', []) if c.get('id') == comment_id),
+        None,
+    )
+    if comment is None:
+        return None
+
+    if _has_response_after(issue, REFINE_COMMENT_PREFIX, comment['createdAt']):
+        return None
+
+    refined = refine_ticket_agent(issue)
+    client.create_comment(issue['id'], REFINE_COMMENT_PREFIX + refined)
+    return refined

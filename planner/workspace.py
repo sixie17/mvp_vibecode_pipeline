@@ -23,6 +23,15 @@ echo the failing URL (token and all) back on an auth/connection failure, not
 just the interpolation of `clone_url` this module does itself. Callers may
 reasonably surface this message somewhere a human can see it (e.g. a ticket
 comment), so it must never carry a live credential.
+
+git's stderr also opens with `Cloning into '<workdir>'...` — plain progress
+noise, not the actual error, but `workdir` is this call's own random
+tempfile.mkdtemp() path, so leaving it in the message made an otherwise
+identical failure compare as a *different* message on every retry. That
+line is stripped before CloneError is raised, since linear/services.py's
+`_post_failure_comment_once()` dedupes a repeated ticket-comment on exact
+message equality and needs the same failure to actually produce the same
+text.
 """
 
 import contextlib
@@ -33,6 +42,7 @@ import tempfile
 from pathlib import Path
 
 _CREDENTIAL_IN_URL_RE = re.compile(r'://[^/\s@]+@')
+_CLONING_INTO_LINE_RE = re.compile(r"(?m)^Cloning into '.*?'\.\.\.\n?")
 
 
 class CloneError(Exception):
@@ -53,7 +63,8 @@ def cloned_repo(clone_url: str, ref: str, *, timeout_seconds: int = 120):
             timeout=timeout_seconds,
         )
         if result.returncode != 0:
-            message = f'git clone of {clone_url!r} at {ref!r} failed: {result.stderr.strip()}'
+            stderr = _CLONING_INTO_LINE_RE.sub('', result.stderr).strip()
+            message = f'git clone of {clone_url!r} at {ref!r} failed: {stderr}'
             raise CloneError(_CREDENTIAL_IN_URL_RE.sub('://***@', message))
         yield workdir
     finally:

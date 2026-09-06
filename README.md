@@ -41,7 +41,7 @@ python manage.py createsuperuser   # optional, for /admin/
 python manage.py runserver
 ```
 
-To actually receive Linear webhooks locally, expose `localhost:8000` with a tunnel (e.g. `ngrok http 8000`) and register `<tunnel-url>/api/linear/webhook/` as an Issue webhook in Linear's settings, using the signing secret as `LINEAR_WEBHOOK_SECRET`.
+To actually receive Linear webhooks locally, expose `localhost:8000` with a tunnel (e.g. `ngrok http 8000`) and register `<tunnel-url>/api/linear/webhook/` as both an Issue and a Comment webhook in Linear's settings, using the signing secret as `LINEAR_WEBHOOK_SECRET` — the Comment subscription is what lets a human reply on an already-refined ticket trigger the step-4 clarification loop.
 
 Same idea for GitHub: register `<tunnel-url>/api/github/webhook/` as a webhook on the target repo (subscribed to "Pull request reviews" and "Pull request review comments"), using its signing secret as `GITHUB_WEBHOOK_SECRET`. Right now this only logs recognized review events — there's no triage or API client wired up yet.
 
@@ -77,7 +77,7 @@ Lane 1's Linear trigger isn't something you curl directly — assign a Linear is
 
 - `config/` — Django project settings, root URLs
 - `agents/` — general LangChain plumbing: `models.py` (`AgentRun`), `services.py` (provider/model-selectable chain construction + invocation), `views.py` / `urls.py` (the `/api/agents/run/` endpoint)
-- `linear/` — Lane 1's Linear-side trigger: `webhooks.py` (signature verification, event filtering), `client.py` (`LinearClient`, GraphQL — the deterministic verify/fail-comment path, and posting both the refine agent's and the plan agent's output), `mcp.py` (Linear's own hosted **read-only** MCP server client), `services.py` (verify deterministically → refine via MCP agent → post spec → plan via `planner/` against `TARGET_REPO_CLONE_URL` → post plan), `views.py` / `urls.py` (the `/api/linear/webhook/` endpoint). No `models.py` — nothing here is persisted locally, by design (see [CLAUDE.md](CLAUDE.md#state-derived-not-stored)).
+- `linear/` — Lane 1's Linear-side trigger: `webhooks.py` (signature verification, event filtering — an issue assigned to the bot, or a human's comment on an already-refined issue), `client.py` (`LinearClient`, GraphQL — the deterministic verify/fail-comment path, and posting the refine/plan/failure comments), `mcp.py` (Linear's own hosted **read-only** MCP server client), `services.py` (verify deterministically → refine via MCP agent → post spec → plan via `planner/` against `TARGET_REPO_CLONE_URL` → post plan; a later human reply re-runs refine via `handle_ticket_comment()`), `views.py` / `urls.py` (the `/api/linear/webhook/` endpoint). No `models.py` — nothing here is persisted locally, by design (see [CLAUDE.md](CLAUDE.md#state-derived-not-stored)).
 - `github/` — Lane 1's GitHub review-side trigger, listening only: `webhooks.py` (signature verification, event filtering), `services.py` (logs recognized review events — no triage yet), `views.py` / `urls.py` (the `/api/github/webhook/` endpoint). No `models.py`, no API client yet.
 - `planner/` — Lane 1 step 5's implementation, called from `linear/`: `workspace.py` (shallow-clones a target repo into a temp dir, always cleaned up), `tools.py` (read-only `grep`/`read_file`/`list_files` tools scoped to that clone, with path-traversal protection), `services.py` (`plan_change` — a tool-using agent that explores the clone and returns a dev plan). No `models.py`, no views/urls of its own, and knows nothing about Linear — see [CLAUDE.md](CLAUDE.md).
 

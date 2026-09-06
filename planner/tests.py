@@ -88,6 +88,27 @@ class ClonedRepoTests(SimpleTestCase):
                 with cloned_repo(f'file://{src}', 'main'):
                     pass
 
+    def test_repeated_identical_failure_produces_the_same_message(self):
+        """Reproduces a real bug: cloned_repo() clones into a fresh random
+        tempfile.mkdtemp() dir every call, and git echoes that path back in
+        stderr's `Cloning into '<dir>'...` progress line. Left in the
+        message, the same underlying failure (e.g. a missing branch)
+        produced a *different* CloneError message on every retry - which
+        silently defeated linear/services.py's `_post_failure_comment_once()`
+        content-equality dedup, so the same explanatory ticket comment kept
+        reposting instead of being recognized as already-explained.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            src = _make_local_repo(Path(tmp))
+            messages = []
+            for _ in range(2):
+                with self.assertRaises(CloneError) as ctx:
+                    with cloned_repo(f'file://{src}', 'no-such-branch'):
+                        pass
+                messages.append(str(ctx.exception))
+            self.assertEqual(messages[0], messages[1])
+            self.assertNotIn('Cloning into', messages[0])
+
     def test_credential_in_clone_url_is_redacted_from_error_message(self):
         """clone_url may carry an embedded x-access-token for a private repo
         (see linear/services.py's _authenticated_clone_url()) - it must never

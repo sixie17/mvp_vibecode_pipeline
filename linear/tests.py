@@ -10,16 +10,21 @@ from langchain_core.messages import AIMessage
 from planner.workspace import CloneError
 
 from .services import (
+    CLONE_FAILURE_COMMENT_PREFIX,
+    INTEGRATION_FAILURE_COMMENT_PREFIX,
     PLAN_COMMENT_PREFIX,
     REFINE_COMMENT_PREFIX,
     IntegrationNotConnected,
     _authenticated_clone_url,
     _find_existing_comment,
+    _has_response_after,
+    _post_failure_comment_once,
     handle_issue_assigned,
+    handle_ticket_comment,
     refine_ticket_agent,
     verify_github_integration,
 )
-from .webhooks import InvalidSignature, check_timestamp, is_issue_assigned_to, verify_signature
+from .webhooks import InvalidSignature, check_timestamp, is_issue_assigned_to, is_new_human_comment, verify_signature
 
 
 class VerifySignatureTests(SimpleTestCase):
@@ -94,6 +99,31 @@ class IsIssueAssignedToTests(SimpleTestCase):
         self.assertFalse(is_issue_assigned_to(payload, 'bot-1'))
 
 
+class IsNewHumanCommentTests(SimpleTestCase):
+    def test_human_created_comment_matches(self):
+        payload = {'type': 'Comment', 'action': 'create', 'data': {'userId': 'human-1', 'issueId': 'issue-1'}}
+        self.assertTrue(is_new_human_comment(payload, 'bot-1'))
+
+    def test_bot_created_comment_does_not_match(self):
+        payload = {'type': 'Comment', 'action': 'create', 'data': {'userId': 'bot-1', 'issueId': 'issue-1'}}
+        self.assertFalse(is_new_human_comment(payload, 'bot-1'))
+
+    def test_comment_with_no_author_does_not_match(self):
+        """Comment.userId can be null for some integration/bot auth
+        configurations - unattributable is not a safe trigger either, since
+        it can't be positively ruled out as the bot's own."""
+        payload = {'type': 'Comment', 'action': 'create', 'data': {'userId': None, 'issueId': 'issue-1'}}
+        self.assertFalse(is_new_human_comment(payload, 'bot-1'))
+
+    def test_comment_update_does_not_match(self):
+        payload = {'type': 'Comment', 'action': 'update', 'data': {'userId': 'human-1', 'issueId': 'issue-1'}}
+        self.assertFalse(is_new_human_comment(payload, 'bot-1'))
+
+    def test_non_comment_event_does_not_match(self):
+        payload = {'type': 'Issue', 'action': 'create', 'data': {'userId': 'human-1'}}
+        self.assertFalse(is_new_human_comment(payload, 'bot-1'))
+
+
 class VerifyGithubIntegrationTests(SimpleTestCase):
     def test_issue_with_branch_name_passes(self):
         verify_github_integration({'identifier': 'ENG-1', 'branchName': 'user/eng-1-fix'})  # does not raise
@@ -118,6 +148,43 @@ class FindExistingCommentTests(SimpleTestCase):
     def test_different_prefix_does_not_match(self):
         issue = {'comments': {'nodes': [{'body': REFINE_COMMENT_PREFIX + 'the spec text'}]}}
         self.assertIsNone(_find_existing_comment(issue, PLAN_COMMENT_PREFIX))
+
+
+class HasResponseAfterTests(SimpleTestCase):
+    def test_no_matching_comment_returns_false(self):
+        issue = {'comments': {'nodes': [{'body': 'unrelated', 'createdAt': '2024-01-02T00:00:00.000Z'}]}}
+        self.assertFalse(_has_response_after(issue, REFINE_COMMENT_PREFIX, '2024-01-01T00:00:00.000Z'))
+
+    def test_matching_comment_before_cutoff_returns_false(self):
+        issue = {'comments': {'nodes': [
+            {'body': REFINE_COMMENT_PREFIX + 'spec', 'createdAt': '2024-01-01T00:00:00.000Z'},
+        ]}}
+        self.assertFalse(_has_response_after(issue, REFINE_COMMENT_PREFIX, '2024-01-02T00:00:00.000Z'))
+
+    def test_matching_comment_after_cutoff_returns_true(self):
+        issue = {'comments': {'nodes': [
+            {'body': REFINE_COMMENT_PREFIX + 'spec', 'createdAt': '2024-01-03T00:00:00.000Z'},
+        ]}}
+        self.assertTrue(_has_response_after(issue, REFINE_COMMENT_PREFIX, '2024-01-02T00:00:00.000Z'))
+
+
+class PostFailureCommentOnceTests(SimpleTestCase):
+    def test_posts_when_no_prior_comment_under_prefix(self):
+        mock_client = MagicMock()
+        _post_failure_comment_once(mock_client, {'id': 'issue-1'}, CLONE_FAILURE_COMMENT_PREFIX, 'boom')
+        mock_client.create_comment.assert_called_once_with('issue-1', CLONE_FAILURE_COMMENT_PREFIX + 'boom')
+
+    def test_skips_when_last_comment_under_prefix_is_identical(self):
+        issue = {'id': 'issue-1', 'comments': {'nodes': [{'body': CLONE_FAILURE_COMMENT_PREFIX + 'boom'}]}}
+        mock_client = MagicMock()
+        _post_failure_comment_once(mock_client, issue, CLONE_FAILURE_COMMENT_PREFIX, 'boom')
+        mock_client.create_comment.assert_not_called()
+
+    def test_posts_when_last_comment_under_prefix_differs(self):
+        issue = {'id': 'issue-1', 'comments': {'nodes': [{'body': CLONE_FAILURE_COMMENT_PREFIX + 'old boom'}]}}
+        mock_client = MagicMock()
+        _post_failure_comment_once(mock_client, issue, CLONE_FAILURE_COMMENT_PREFIX, 'new boom')
+        mock_client.create_comment.assert_called_once_with('issue-1', CLONE_FAILURE_COMMENT_PREFIX + 'new boom')
 
 
 class AuthenticatedCloneUrlTests(SimpleTestCase):
@@ -270,7 +337,74 @@ class HandleIssueAssignedTests(SimpleTestCase):
         self.assertEqual(mock_client.create_comment.call_count, 2)
         failure_issue_id, failure_message = mock_client.create_comment.call_args_list[1].args
         self.assertEqual(failure_issue_id, 'issue-1')
+        self.assertTrue(failure_message.startswith(CLONE_FAILURE_COMMENT_PREFIX))
         self.assertIn('branch main not found', failure_message)
+
+    def test_does_not_repost_identical_clone_failure_on_retry(self):
+        """Reproduces the empty-repo bug: Linear retries the same webhook up
+        to 3x, and every retry hits the same CloneError, so without content
+        dedup the same explanatory comment got reposted 2-3 times."""
+        failure_message = CLONE_FAILURE_COMMENT_PREFIX + (
+            "I refined this ticket, but couldn't clone the target repo to plan "
+            'against it: branch main not found\n\nCheck TARGET_REPO_CLONE_URL/'
+            'TARGET_REPO_DEFAULT_BRANCH, and that the repo has at least one '
+            'commit on that branch, then reassign me.'
+        )
+        issue = {
+            'id': 'issue-1',
+            'identifier': 'ENG-1',
+            'branchName': 'user/eng-1-fix',
+            'comments': {'nodes': [
+                {'body': REFINE_COMMENT_PREFIX + 'already refined spec'},
+                {'body': failure_message},
+            ]},
+        }
+        mock_client = MagicMock()
+        mock_client.get_issue.return_value = issue
+
+        with patch('linear.services.LinearClient', return_value=mock_client), \
+                patch('linear.services.refine_ticket_agent') as mock_agent, \
+                patch('linear.services.plan_change', side_effect=CloneError('branch main not found')), \
+                patch('linear.services.settings') as mock_settings:
+            mock_settings.LINEAR_API_KEY = 'key'
+            mock_settings.TARGET_REPO_CLONE_URL = 'https://github.com/acme/widgets.git'
+            mock_settings.TARGET_REPO_DEFAULT_BRANCH = 'main'
+            mock_settings.TARGET_REPO_ACCESS_TOKEN = ''
+            with self.assertRaises(CloneError):
+                handle_issue_assigned('issue-1')
+
+        mock_agent.assert_not_called()
+        mock_client.create_comment.assert_not_called()
+
+    def test_reposts_clone_failure_when_the_underlying_error_changes(self):
+        issue = {
+            'id': 'issue-1',
+            'identifier': 'ENG-1',
+            'branchName': 'user/eng-1-fix',
+            'comments': {'nodes': [
+                {'body': REFINE_COMMENT_PREFIX + 'already refined spec'},
+                {'body': CLONE_FAILURE_COMMENT_PREFIX + 'a stale, now-fixed explanation'},
+            ]},
+        }
+        mock_client = MagicMock()
+        mock_client.get_issue.return_value = issue
+
+        with patch('linear.services.LinearClient', return_value=mock_client), \
+                patch('linear.services.refine_ticket_agent') as mock_agent, \
+                patch('linear.services.plan_change', side_effect=CloneError('a different failure now')), \
+                patch('linear.services.settings') as mock_settings:
+            mock_settings.LINEAR_API_KEY = 'key'
+            mock_settings.TARGET_REPO_CLONE_URL = 'https://github.com/acme/widgets.git'
+            mock_settings.TARGET_REPO_DEFAULT_BRANCH = 'main'
+            mock_settings.TARGET_REPO_ACCESS_TOKEN = ''
+            with self.assertRaises(CloneError):
+                handle_issue_assigned('issue-1')
+
+        mock_agent.assert_not_called()
+        mock_client.create_comment.assert_called_once()
+        posted_issue_id, posted_message = mock_client.create_comment.call_args.args
+        self.assertEqual(posted_issue_id, 'issue-1')
+        self.assertIn('a different failure now', posted_message)
 
     def test_stops_and_comments_without_running_agent_when_integration_missing(self):
         issue = {'id': 'issue-1', 'identifier': 'ENG-1', 'branchName': ''}
@@ -286,4 +420,112 @@ class HandleIssueAssignedTests(SimpleTestCase):
         mock_client.create_comment.assert_called_once()
         posted_issue_id, posted_message = mock_client.create_comment.call_args.args
         self.assertEqual(posted_issue_id, 'issue-1')
+        self.assertTrue(posted_message.startswith(INTEGRATION_FAILURE_COMMENT_PREFIX))
         self.assertIn('integration', posted_message)
+
+    def test_does_not_repost_identical_integration_failure_on_retry(self):
+        integration_message = INTEGRATION_FAILURE_COMMENT_PREFIX + (
+            "I can't start on this ticket yet: this project's Linear<->GitHub "
+            "integration doesn't look connected, so I have no way to link a "
+            'branch or pull request back to it. Please connect the integration '
+            'and reassign me.'
+        )
+        issue = {
+            'id': 'issue-1',
+            'identifier': 'ENG-1',
+            'branchName': '',
+            'comments': {'nodes': [{'body': integration_message}]},
+        }
+        mock_client = MagicMock()
+        mock_client.get_issue.return_value = issue
+
+        with patch('linear.services.LinearClient', return_value=mock_client), \
+                patch('linear.services.refine_ticket_agent') as mock_agent:
+            with self.assertRaises(IntegrationNotConnected):
+                handle_issue_assigned('issue-1')
+
+        mock_agent.assert_not_called()
+        mock_client.create_comment.assert_not_called()
+
+
+class HandleTicketCommentTests(SimpleTestCase):
+    def test_skips_when_issue_has_not_been_refined_yet(self):
+        """A stray comment on a ticket that hasn't gone through refine isn't
+        a reply to anything the agent asked."""
+        issue = {
+            'id': 'issue-1',
+            'identifier': 'ENG-1',
+            'comments': {'nodes': [{'id': 'comment-1', 'body': 'just a comment', 'createdAt': '2024-01-01T00:00:00.000Z'}]},
+        }
+        mock_client = MagicMock()
+        mock_client.get_issue.return_value = issue
+
+        with patch('linear.services.LinearClient', return_value=mock_client), \
+                patch('linear.services.refine_ticket_agent') as mock_agent:
+            result = handle_ticket_comment('issue-1', 'comment-1')
+
+        self.assertIsNone(result)
+        mock_agent.assert_not_called()
+        mock_client.create_comment.assert_not_called()
+
+    def test_skips_when_the_triggering_comment_is_not_found(self):
+        issue = {
+            'id': 'issue-1',
+            'identifier': 'ENG-1',
+            'comments': {'nodes': [{'id': 'comment-1', 'body': REFINE_COMMENT_PREFIX + 'spec', 'createdAt': '2024-01-01T00:00:00.000Z'}]},
+        }
+        mock_client = MagicMock()
+        mock_client.get_issue.return_value = issue
+
+        with patch('linear.services.LinearClient', return_value=mock_client), \
+                patch('linear.services.refine_ticket_agent') as mock_agent:
+            result = handle_ticket_comment('issue-1', 'comment-does-not-exist')
+
+        self.assertIsNone(result)
+        mock_agent.assert_not_called()
+        mock_client.create_comment.assert_not_called()
+
+    def test_skips_when_already_responded_to_this_reply(self):
+        """Reproduces the retry-duplication risk: Linear retries an
+        undelivered webhook up to 3x, and without this check each retry
+        would re-run the agent and repost another revised spec for the same
+        human reply."""
+        issue = {
+            'id': 'issue-1',
+            'identifier': 'ENG-1',
+            'comments': {'nodes': [
+                {'id': 'refine-1', 'body': REFINE_COMMENT_PREFIX + 'first spec', 'createdAt': '2024-01-01T00:00:00.000Z'},
+                {'id': 'reply-1', 'body': 'can you clarify X?', 'createdAt': '2024-01-02T00:00:00.000Z'},
+                {'id': 'refine-2', 'body': REFINE_COMMENT_PREFIX + 'revised spec', 'createdAt': '2024-01-03T00:00:00.000Z'},
+            ]},
+        }
+        mock_client = MagicMock()
+        mock_client.get_issue.return_value = issue
+
+        with patch('linear.services.LinearClient', return_value=mock_client), \
+                patch('linear.services.refine_ticket_agent') as mock_agent:
+            result = handle_ticket_comment('issue-1', 'reply-1')
+
+        self.assertIsNone(result)
+        mock_agent.assert_not_called()
+        mock_client.create_comment.assert_not_called()
+
+    def test_reruns_refine_agent_and_posts_revised_spec_for_a_new_reply(self):
+        issue = {
+            'id': 'issue-1',
+            'identifier': 'ENG-1',
+            'comments': {'nodes': [
+                {'id': 'refine-1', 'body': REFINE_COMMENT_PREFIX + 'first spec', 'createdAt': '2024-01-01T00:00:00.000Z'},
+                {'id': 'reply-1', 'body': 'can you clarify X?', 'createdAt': '2024-01-02T00:00:00.000Z'},
+            ]},
+        }
+        mock_client = MagicMock()
+        mock_client.get_issue.return_value = issue
+
+        with patch('linear.services.LinearClient', return_value=mock_client), \
+                patch('linear.services.refine_ticket_agent', return_value='revised spec') as mock_agent:
+            result = handle_ticket_comment('issue-1', 'reply-1')
+
+        mock_agent.assert_called_once_with(issue)
+        mock_client.create_comment.assert_called_once_with('issue-1', REFINE_COMMENT_PREFIX + 'revised spec')
+        self.assertEqual(result, 'revised spec')

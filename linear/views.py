@@ -1,5 +1,13 @@
-"""Webhook receiver for Linear issue events — Lane 1's trigger, step 1
-(CLAUDE.md#lane-1--implementation-agent-ticket--pr--merged).
+"""Webhook receiver for Linear issue and comment events — Lane 1's trigger,
+step 1 (CLAUDE.md#lane-1--implementation-agent-ticket--pr--merged).
+
+Handles two independent event shapes from the same Linear webhook
+subscription: an issue newly assigned to the bot (kicks off refine/plan),
+and a human's comment on an already-refined issue (kicks off step 4's
+clarification loop — see linear/services.py's handle_ticket_comment()). The
+two `is_*` filters are mutually exclusive by construction (`payload['type']`
+is either 'Issue' or 'Comment', never both), so both branches are plain
+`if`s rather than `if`/`elif`.
 
 Runs the whole Lane 1 flow inline within the request, per the scaffolding
 decision to defer a task queue until the flow itself is proven out (see
@@ -17,8 +25,14 @@ from django.views.decorators.csrf import csrf_exempt
 
 from planner.workspace import CloneError
 
-from .services import IntegrationNotConnected, handle_issue_assigned
-from .webhooks import InvalidSignature, check_timestamp, is_issue_assigned_to, verify_signature
+from .services import IntegrationNotConnected, handle_issue_assigned, handle_ticket_comment
+from .webhooks import (
+    InvalidSignature,
+    check_timestamp,
+    is_issue_assigned_to,
+    is_new_human_comment,
+    verify_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +73,16 @@ class LinearWebhookView(View):
                 pass
             except Exception:
                 logger.exception('Lane 1 failed for issue %s', payload['data'].get('id'))
+                return HttpResponse(status=500)
+
+        if is_new_human_comment(payload, settings.LINEAR_BOT_USER_ID):
+            try:
+                handle_ticket_comment(payload['data']['issueId'], payload['data']['id'])
+            except Exception:
+                logger.exception(
+                    'Lane 1 comment-reply handling failed for issue %s',
+                    payload['data'].get('issueId'),
+                )
                 return HttpResponse(status=500)
 
         return HttpResponse(status=200)

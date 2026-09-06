@@ -27,7 +27,7 @@ query($id: String!) {
       nodes { url title sourceType }
     }
     comments {
-      nodes { body }
+      nodes { id body createdAt }
     }
   }
 }
@@ -69,7 +69,11 @@ class LinearClient:
         integration" step, and comments so handle_issue_assigned() can tell
         whether refine/plan already ran for this issue (see
         linear/services.py's idempotency handling) without storing anything
-        locally.
+        locally. Each comment's `id`/`createdAt` (not just `body`) are
+        fetched too, so handle_ticket_comment() can tell whether the agent
+        has already responded to a specific reply comment by comparing
+        timestamps, rather than needing to persist which comment triggered
+        which response.
         """
         return self._execute(_GET_ISSUE_QUERY, {'id': issue_id})['issue']
 
